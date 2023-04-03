@@ -64,6 +64,19 @@
 #include <linux/cgroup.h>
 #include <linux/wait.h>
 
+#ifdef CONFIG_MTK_SCHED_EXTENSION
+#define CS_SCHED_PREFER_NONE   0
+#define CS_SCHED_PREFER_BIG    1
+#define CS_SCHED_PREFER_LITTLE 2
+#define CS_SCHED_PREFER_END    3
+#endif
+
+#ifdef CONFIG_OPLUS_FEATURE_UID_PERF
+#include <linux/perf_event.h>
+#include <linux/module.h>
+#include "cgroup-internal.h"
+#endif
+
 DEFINE_STATIC_KEY_FALSE(cpusets_pre_enable_key);
 DEFINE_STATIC_KEY_FALSE(cpusets_enabled_key);
 
@@ -135,6 +148,9 @@ struct cpuset {
 
 	/* for custom sched domain */
 	int relax_domain_level;
+#ifdef CONFIG_MTK_SCHED_EXTENSION
+	u64 prefer_cpu;
+#endif
 };
 
 static inline struct cpuset *css_cs(struct cgroup_subsys_state *css)
@@ -308,7 +324,8 @@ static DECLARE_WAIT_QUEUE_HEAD(cpuset_attach_wq);
 static inline bool is_in_v2_mode(void)
 {
 	return cgroup_subsys_on_dfl(cpuset_cgrp_subsys) ||
-	      (cpuset_cgrp_subsys.root->flags & CGRP_ROOT_CPUSET_V2_MODE);
+	      (cpuset_cgrp_subsys.root->flags & CGRP_ROOT_CPUSET_V2_MODE) ||
+		true;
 }
 
 /*
@@ -820,6 +837,19 @@ done:
 	return ndoms;
 }
 
+static void cpuset_sched_change_begin(void)
+{
+	cpus_read_lock();
+	mutex_lock(&cpuset_mutex);
+}
+
+static void cpuset_sched_change_end(void)
+{
+	mutex_unlock(&cpuset_mutex);
+	cpus_read_unlock();
+}
+
+
 /*
  * Rebuild scheduler domains.
  *
@@ -829,16 +859,14 @@ done:
  * 'cpus' is removed, then call this routine to rebuild the
  * scheduler's dynamic sched domains.
  *
- * Call with cpuset_mutex held.  Takes get_online_cpus().
  */
-static void rebuild_sched_domains_locked(void)
+static void rebuild_sched_domains_cpuslocked(void)
 {
 	struct sched_domain_attr *attr;
 	cpumask_var_t *doms;
 	int ndoms;
 
 	lockdep_assert_held(&cpuset_mutex);
-	get_online_cpus();
 
 	/*
 	 * We have raced with CPU hotplug. Don't do anything to avoid
@@ -846,27 +874,25 @@ static void rebuild_sched_domains_locked(void)
 	 * Anyways, hotplug work item will rebuild sched domains.
 	 */
 	if (!cpumask_equal(top_cpuset.effective_cpus, cpu_active_mask))
-		goto out;
+		return;
 
 	/* Generate domain masks and attrs */
 	ndoms = generate_sched_domains(&doms, &attr);
 
 	/* Have scheduler rebuild the domains */
 	partition_sched_domains(ndoms, doms, attr);
-out:
-	put_online_cpus();
 }
 #else /* !CONFIG_SMP */
-static void rebuild_sched_domains_locked(void)
+static void rebuild_sched_domains_cpuslocked(void)
 {
 }
 #endif /* CONFIG_SMP */
 
 void rebuild_sched_domains(void)
 {
-	mutex_lock(&cpuset_mutex);
-	rebuild_sched_domains_locked();
-	mutex_unlock(&cpuset_mutex);
+	cpuset_sched_change_begin();
+	rebuild_sched_domains_cpuslocked();
+	cpuset_sched_change_end();
 }
 
 /**
@@ -952,7 +978,7 @@ static void update_cpumasks_hier(struct cpuset *cs, struct cpumask *new_cpus)
 	rcu_read_unlock();
 
 	if (need_rebuild_sched_domains)
-		rebuild_sched_domains_locked();
+		rebuild_sched_domains_cpuslocked();
 }
 
 /**
@@ -1286,7 +1312,7 @@ static int update_relax_domain_level(struct cpuset *cs, s64 val)
 		cs->relax_domain_level = val;
 		if (!cpumask_empty(cs->cpus_allowed) &&
 		    is_sched_load_balance(cs))
-			rebuild_sched_domains_locked();
+			rebuild_sched_domains_cpuslocked();
 	}
 
 	return 0;
@@ -1319,7 +1345,6 @@ static void update_tasks_flags(struct cpuset *cs)
  *
  * Call with cpuset_mutex held.
  */
-
 static int update_flag(cpuset_flagbits_t bit, struct cpuset *cs,
 		       int turning_on)
 {
@@ -1352,7 +1377,7 @@ static int update_flag(cpuset_flagbits_t bit, struct cpuset *cs,
 	spin_unlock_irq(&callback_lock);
 
 	if (!cpumask_empty(trialcs->cpus_allowed) && balance_flag_changed)
-		rebuild_sched_domains_locked();
+		rebuild_sched_domains_cpuslocked();
 
 	if (spread_flag_changed)
 		update_tasks_flags(cs);
@@ -1462,6 +1487,306 @@ static int fmeter_getrate(struct fmeter *fmp)
 	return val;
 }
 
+#ifdef CONFIG_OPLUS_FEATURE_UID_PERF
+#define CG_HASH_BITS 3
+#define MAX_BOOL_LEN 2
+static struct proc_dir_entry *cpu_parent;
+
+static bool dbg_enable;
+
+DECLARE_HASHTABLE(cg_hash_table, CG_HASH_BITS);
+struct cg_entry {
+	int cgid;
+	char name[MAX_CGROUP_TYPE_NAMELEN];
+	struct hlist_node hash;
+};
+
+/*
+ * get the index of the cgroup by cgid
+ */
+static int get_cpuset_cgrp_idx(int cgid)
+{
+	struct cg_entry* cg;
+	unsigned long bkt;
+	int idx = 0;
+
+	hash_for_each(cg_hash_table, bkt, cg, hash) {
+		if (cg->cgid == cgid)
+			goto end;
+		idx++;
+	}
+	idx = -1;
+end:
+	if (dbg_enable)
+		pr_err("%s: cgrp_id=%d return idx=%d", __func__, cgid, idx);
+
+	return idx;
+}
+
+/*
+ * get the index of the cgroup by name
+ */
+int get_cpuset_cgrp_idx_by_name(const char *cg_name)
+{
+	struct cg_entry* cg;
+	unsigned long bkt;
+	int idx = 0;
+
+	hash_for_each(cg_hash_table, bkt, cg, hash) {
+		if (!strncmp(cg->name, cg_name, strlen(cg_name)))
+			goto end;
+		idx++;
+	}
+	idx = -1;
+end:
+	if (dbg_enable)
+		pr_err("%s: cgrp_name=%s return idx=%d", __func__, cg_name, idx);
+
+	return idx;
+}
+
+static int hash_show(struct seq_file *m, void *v)
+{
+	struct cg_entry* cg;
+        unsigned long bkt;
+	int i;
+
+        hash_for_each(cg_hash_table, bkt, cg, hash) {
+                seq_printf(m, "cgid=\"%d\",name=\"%s\",idx=\"%d\"\n", cg->cgid, cg->name, get_cpuset_cgrp_idx(cg->cgid));
+        }
+
+	seq_printf(m, "===========\n");
+
+	for(i = 2; i < 13; i++) {
+		seq_printf(m, "cgid = %d, idx = %d\n",i, get_cpuset_cgrp_idx(i));
+	}
+
+        return 0;
+}
+
+static int hashdump_open(struct inode *inode, struct file *file)
+{
+        return single_open(file, hash_show, NULL);
+}
+
+static const struct file_operations hashdump_fops = {
+        .open           = hashdump_open,
+        .read           = seq_read,
+        .llseek         = seq_lseek,
+        .release        = single_release,
+};
+
+static int dbg_show(struct seq_file *m, void *v)
+{
+        seq_printf(m, "%d\n", dbg_enable);
+        return 0;
+}
+
+static ssize_t dbg_proc_write(struct file *file, const char __user *buf,
+		size_t count, loff_t *ppos)
+{
+	char buffer[MAX_BOOL_LEN];
+	int err = 0;
+	int enable;
+
+	memset(buffer, 0, sizeof(buffer));
+
+	if (count > sizeof(buffer) - 1)
+		count = sizeof(buffer) - 1;
+
+	if (copy_from_user((void *)buffer, buf, count)) {
+		err = -EFAULT;
+		goto out;
+	}
+	err = kstrtoint(strstrip(buffer), 0, &enable);
+	if (err)
+		goto out;
+
+	dbg_enable = enable;
+out:
+	return err < 0 ? err : count;
+}
+
+static int dbg_proc_open(struct inode *inode, struct file *file)
+{
+        return single_open(file, dbg_show, NULL);
+}
+
+static const struct file_operations dbg_fops = {
+        .open           = dbg_proc_open,
+	.write		= dbg_proc_write,
+        .read           = seq_read,
+        .llseek         = seq_lseek,
+        .release        = single_release,
+};
+
+void cpuset_add_cg(int cgid, char* name)
+{
+	struct cg_entry* cg;
+
+	/* MUSTFIX: cgroup array of task_struct only has 8 buckets */
+	if (cgid > UID_GROUP_SIZE + 1)
+		return;
+
+        cg = kzalloc(sizeof(struct cg_entry), GFP_ATOMIC);
+        if (!cg)
+                return;
+
+        cg->cgid = cgid;
+	strncpy(cg->name, name, MAX_CGROUP_TYPE_NAMELEN);
+	hash_add(cg_hash_table, &cg->hash, cgid);
+}
+
+
+static void cpuset_calc_counter(struct task_struct *task)
+{
+	u64 enabled, running;
+	int i, src_idx = -1, dst_idx = -1;
+	struct css_set *cset;
+	char cg_src[MAX_CGROUP_TYPE_NAMELEN], cg_dst[MAX_CGROUP_TYPE_NAMELEN];
+	u64 val;
+
+	if (!get_uid_perf_enable())
+		return;
+
+	rcu_read_lock();
+	spin_lock_irq(&css_set_lock);
+
+	cset = task_css_set(task);
+	if (cset->mg_src_cgrp && cset->mg_dst_cgrp) {
+		cgroup_name(cset->mg_src_cgrp, cg_src, MAX_CGROUP_TYPE_NAMELEN);
+		cgroup_name(cset->mg_dst_cgrp, cg_dst, MAX_CGROUP_TYPE_NAMELEN);
+		if (dbg_enable)
+			pr_err("%s: src_cg = %s, id = %d, dst_cg = %s, id = %d, task = %s, pid=%d",
+				__func__, cg_src, cset->mg_src_cgrp->id, cg_dst, cset->mg_dst_cgrp->id, task->comm, task->pid);
+
+		src_idx = get_cpuset_cgrp_idx(cset->mg_src_cgrp->id);
+		dst_idx = get_cpuset_cgrp_idx(cset->mg_dst_cgrp->id);
+
+		if (src_idx == -1 || dst_idx == -1) {
+			pr_err("%s: src_cg = %s, id = %d, dst_cg = %s, id = %d, task = %s, pid=%d",
+				__func__, cg_src, cset->mg_src_cgrp->id, cg_dst, cset->mg_dst_cgrp->id, task->comm, task->pid);
+		}
+
+	} else {
+		if (cset->mg_src_cgrp == NULL)
+			pr_err("%s: mg_src_cgrp is NULL", __func__);
+		else {
+			cgroup_name(cset->mg_src_cgrp, cg_src, MAX_CGROUP_TYPE_NAMELEN);
+			pr_err("%s: mg_src_cgrp is : %s", __func__, cg_src);
+		}
+
+		if (cset->mg_dst_cgrp == NULL)
+			pr_err("%s: mg_dst_cgrp is NULL", __func__);
+		else {
+			cgroup_name(cset->mg_dst_cgrp, cg_dst, MAX_CGROUP_TYPE_NAMELEN);
+			pr_err("%s: mg_dst_cgrp is : %s", __func__, cg_dst);
+		}
+	}
+
+	spin_unlock_irq(&css_set_lock);
+
+	if (src_idx == -1 || dst_idx == -1) {
+		pr_err("%s: cannot calc counter", __func__);
+		rcu_read_unlock();
+		return;
+	}
+
+	if (!(task->flags & PF_EXITING)) {
+		get_task_struct(task);
+		rcu_read_unlock();
+
+		/* MUST FIX: calc the pevent only idx=0 instruction counters */
+		for (i = 0; i < 1/*UID_PERF_EVENTS*/; ++i) {
+			val = 0;
+
+			if (task->uid_pevents[i]) {
+				u64 tmp = 0;
+				/* settlement prev cgroup */
+				val = perf_event_read_value(task->uid_pevents[i], &enabled, &running);
+				task->uid_group[src_idx] += (val - task->uid_group_prev_counts[src_idx]);
+				tmp = task->uid_group_prev_counts[src_idx];
+				task->uid_group_prev_counts[src_idx] = 0;
+
+				/* setup dst cgroup prev counters */
+				task->uid_group_prev_counts[dst_idx] = val;
+				if (dbg_enable)
+					pr_err("%s: pid=%d comm=%s val=%llu uid_group[%d] = %llu uid_group_prev_counts[%d] = %llu uid_group_prev_counts[%d] = %llu",
+						__func__, task->pid, task->comm, val,
+						src_idx, task->uid_group[src_idx],
+						src_idx, tmp,
+						dst_idx, task->uid_group_prev_counts[dst_idx]);
+
+			}
+		}
+
+		rcu_read_lock();
+		put_task_struct(task);
+	}
+	rcu_read_unlock();
+}
+
+int cpuset_get_cgrp_idx(struct task_struct *task)
+{
+	int cgrp_id = -1, idx = -1;
+	struct css_set *cset;
+
+	if (!get_uid_perf_enable())
+		return idx;
+
+	rcu_read_lock();
+	spin_lock_irq(&css_set_lock);
+
+	cset = task_css_set(task);
+	if (cset->subsys[cpuset_cgrp_id] && cset->subsys[cpuset_cgrp_id]->cgroup)
+		cgrp_id = cset->subsys[cpuset_cgrp_id]->cgroup->id;
+	else
+		pr_err("%s: cannot get cgrp id", __func__);
+
+	spin_unlock_irq(&css_set_lock);
+	rcu_read_unlock();
+
+	if (cgrp_id > 0)
+		idx = get_cpuset_cgrp_idx(cgrp_id);
+
+	if (idx < 0)
+		if (dbg_enable)
+			pr_err("%s: cset->subsys[cpuset_cgrp_id]->cgroup->id = %d, array idx = %d", __func__, cgrp_id, idx);
+
+	return idx;
+
+}
+
+int cpuset_get_cgrp_idx_locked(struct task_struct *task)
+{
+	int cgrp_id = -1, idx = -1;
+	struct css_set *cset;
+
+	//if (!get_uid_perf_enable())
+	//	return idx;
+
+	spin_lock_irq(&css_set_lock);
+
+	cset = task_css_set(task);
+	if (cset->subsys[cpuset_cgrp_id] && cset->subsys[cpuset_cgrp_id]->cgroup)
+		cgrp_id = cset->subsys[cpuset_cgrp_id]->cgroup->id;
+	else
+		pr_err("%s: cannot get cgrp id", __func__);
+
+	spin_unlock_irq(&css_set_lock);
+
+	if (cgrp_id > 0)
+		idx = get_cpuset_cgrp_idx(cgrp_id);
+
+	if (idx < 0)
+		if (dbg_enable)
+			pr_err("%s: cset->subsys->cgroup->id = %d, array idx = %d", __func__, cgrp_id, idx);
+
+	return idx;
+
+}
+#endif
+
 static struct cpuset *cpuset_attach_old_cs;
 
 /* Called by cgroups to determine if a cpuset is usable; cpuset_mutex held */
@@ -1488,6 +1813,9 @@ static int cpuset_can_attach(struct cgroup_taskset *tset)
 		ret = task_can_attach(task, cs->cpus_allowed);
 		if (ret)
 			goto out_unlock;
+#ifdef CONFIG_OPLUS_FEATURE_UID_PERF
+		cpuset_calc_counter(task);
+#endif
 		ret = security_task_setscheduler(task);
 		if (ret)
 			goto out_unlock;
@@ -1611,6 +1939,9 @@ typedef enum {
 	FILE_MEMORY_PRESSURE,
 	FILE_SPREAD_PAGE,
 	FILE_SPREAD_SLAB,
+#ifdef CONFIG_MTK_SCHED_EXTENSION
+	FILE_PREFER_CPU
+#endif
 } cpuset_filetype_t;
 
 static int cpuset_write_u64(struct cgroup_subsys_state *css, struct cftype *cft,
@@ -1620,7 +1951,7 @@ static int cpuset_write_u64(struct cgroup_subsys_state *css, struct cftype *cft,
 	cpuset_filetype_t type = cft->private;
 	int retval = 0;
 
-	mutex_lock(&cpuset_mutex);
+	cpuset_sched_change_begin();
 	if (!is_cpuset_online(cs)) {
 		retval = -ENODEV;
 		goto out_unlock;
@@ -1651,12 +1982,18 @@ static int cpuset_write_u64(struct cgroup_subsys_state *css, struct cftype *cft,
 	case FILE_SPREAD_SLAB:
 		retval = update_flag(CS_SPREAD_SLAB, cs, val);
 		break;
+#ifdef CONFIG_MTK_SCHED_EXTENSION
+	case FILE_PREFER_CPU:
+		if (val >= CS_SCHED_PREFER_NONE && val < CS_SCHED_PREFER_END)
+			cs->prefer_cpu = val;
+		break;
+#endif
 	default:
 		retval = -EINVAL;
 		break;
 	}
 out_unlock:
-	mutex_unlock(&cpuset_mutex);
+	cpuset_sched_change_end();
 	return retval;
 }
 
@@ -1667,7 +2004,7 @@ static int cpuset_write_s64(struct cgroup_subsys_state *css, struct cftype *cft,
 	cpuset_filetype_t type = cft->private;
 	int retval = -ENODEV;
 
-	mutex_lock(&cpuset_mutex);
+	cpuset_sched_change_begin();
 	if (!is_cpuset_online(cs))
 		goto out_unlock;
 
@@ -1680,7 +2017,7 @@ static int cpuset_write_s64(struct cgroup_subsys_state *css, struct cftype *cft,
 		break;
 	}
 out_unlock:
-	mutex_unlock(&cpuset_mutex);
+	cpuset_sched_change_end();
 	return retval;
 }
 
@@ -1719,7 +2056,7 @@ static ssize_t cpuset_write_resmask(struct kernfs_open_file *of,
 	kernfs_break_active_protection(of->kn);
 	flush_work(&cpuset_hotplug_work);
 
-	mutex_lock(&cpuset_mutex);
+	cpuset_sched_change_begin();
 	if (!is_cpuset_online(cs))
 		goto out_unlock;
 
@@ -1743,7 +2080,7 @@ static ssize_t cpuset_write_resmask(struct kernfs_open_file *of,
 
 	free_trial_cpuset(trialcs);
 out_unlock:
-	mutex_unlock(&cpuset_mutex);
+	cpuset_sched_change_end();
 	kernfs_unbreak_active_protection(of->kn);
 	css_put(&cs->css);
 	flush_workqueue(cpuset_migrate_mm_wq);
@@ -1810,6 +2147,10 @@ static u64 cpuset_read_u64(struct cgroup_subsys_state *css, struct cftype *cft)
 		return is_spread_page(cs);
 	case FILE_SPREAD_SLAB:
 		return is_spread_slab(cs);
+#ifdef CONFIG_MTK_SCHED_EXTENSION
+	case FILE_PREFER_CPU:
+		return cs->prefer_cpu;
+#endif
 	default:
 		BUG();
 	}
@@ -1936,6 +2277,14 @@ static struct cftype files[] = {
 		.write_u64 = cpuset_write_u64,
 		.private = FILE_MEMORY_PRESSURE_ENABLED,
 	},
+#ifdef CONFIG_MTK_SCHED_EXTENSION
+	{
+		.name = "prefer_cpu",
+		.read_u64 = cpuset_read_u64,
+		.write_u64 = cpuset_write_u64,
+		.private = FILE_PREFER_CPU,
+	},
+#endif
 
 	{ }	/* terminate */
 };
@@ -2050,14 +2399,14 @@ out_unlock:
 /*
  * If the cpuset being removed has its flag 'sched_load_balance'
  * enabled, then simulate turning sched_load_balance off, which
- * will call rebuild_sched_domains_locked().
+ * will call rebuild_sched_domains_cpuslocked().
  */
 
 static void cpuset_css_offline(struct cgroup_subsys_state *css)
 {
 	struct cpuset *cs = css_cs(css);
 
-	mutex_lock(&cpuset_mutex);
+	cpuset_sched_change_begin();
 
 	if (is_sched_load_balance(cs))
 		update_flag(CS_SCHED_LOAD_BALANCE, cs, 0);
@@ -2065,7 +2414,7 @@ static void cpuset_css_offline(struct cgroup_subsys_state *css)
 	cpuset_dec();
 	clear_bit(CS_ONLINE, &cs->flags);
 
-	mutex_unlock(&cpuset_mutex);
+	cpuset_sched_change_end();
 }
 
 static void cpuset_css_free(struct cgroup_subsys_state *css)
@@ -2154,6 +2503,18 @@ int __init cpuset_init(void)
 		return err;
 
 	BUG_ON(!alloc_cpumask_var(&cpus_attach, GFP_KERNEL));
+
+#ifdef CONFIG_OPLUS_FEATURE_UID_PERF
+	cpu_parent = proc_mkdir("cpuset_info", NULL);
+	if (!cpu_parent) {
+		pr_err("%s: failed to create cpuset_info proc entry\n",  __func__);
+		remove_proc_subtree("cpuset_info", NULL);
+		goto end;
+        }
+	proc_create_data("show_hash", 0444, cpu_parent, &hashdump_fops, NULL);
+	proc_create_data("dbg_enable", 0644, cpu_parent, &dbg_fops, NULL);
+end:
+#endif
 
 	return 0;
 }
@@ -2786,3 +3147,16 @@ void cpuset_task_status_allowed(struct seq_file *m, struct task_struct *task)
 	seq_printf(m, "Mems_allowed_list:\t%*pbl\n",
 		   nodemask_pr_args(&task->mems_allowed));
 }
+
+#ifdef CONFIG_MTK_SCHED_EXTENSION
+int task_cs_cpu_perfer(struct task_struct *task)
+{
+	int cpu_prefer = 0;
+
+	rcu_read_lock();
+	cpu_prefer = task_cs(task)->prefer_cpu;
+	rcu_read_unlock();
+
+	return cpu_prefer;
+}
+#endif
