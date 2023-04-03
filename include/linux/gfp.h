@@ -45,6 +45,8 @@ struct vm_area_struct;
 #define ___GFP_NOLOCKDEP	0
 #endif
 #define ___GFP_CMA		0x1000000u
+#define ___GFP_HIGH_ATOMIC_ZRAM 0x2000000u
+
 /* If the above are modified, __GFP_BITS_SHIFT may need updating */
 
 /*
@@ -219,7 +221,7 @@ struct vm_area_struct;
 #define __GFP_NOLOCKDEP ((__force gfp_t)___GFP_NOLOCKDEP)
 
 /* Room for N __GFP_FOO bits */
-#define __GFP_BITS_SHIFT (25)
+#define __GFP_BITS_SHIFT (26)
 #ifdef CONFIG_LOCKDEP
 #define __GFP_BITS_MASK ((__force gfp_t)((1 << __GFP_BITS_SHIFT) - 1))
 #else
@@ -302,8 +304,13 @@ struct vm_area_struct;
 #define GFP_USER	(__GFP_RECLAIM | __GFP_IO | __GFP_FS | __GFP_HARDWALL)
 #define GFP_DMA		__GFP_DMA
 #define GFP_DMA32	__GFP_DMA32
+#ifdef CONFIG_DMAUSER_PAGES
+#define GFP_HIGHUSER    (GFP_USER | GFP_DMA)
+#define GFP_HIGHUSER_MOVABLE    (GFP_HIGHUSER)
+#else
 #define GFP_HIGHUSER	(GFP_USER | __GFP_HIGHMEM)
 #define GFP_HIGHUSER_MOVABLE	(GFP_HIGHUSER | __GFP_MOVABLE)
+#endif
 #define GFP_TRANSHUGE_LIGHT	((GFP_HIGHUSER_MOVABLE | __GFP_COMP | \
 			 __GFP_NOMEMALLOC | __GFP_NOWARN) & ~__GFP_RECLAIM)
 #define GFP_TRANSHUGE	(GFP_TRANSHUGE_LIGHT | __GFP_DIRECT_RECLAIM)

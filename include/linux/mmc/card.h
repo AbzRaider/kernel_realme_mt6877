@@ -35,6 +35,7 @@ struct mmc_csd {
 	unsigned int		r2w_factor;
 	unsigned int		max_dtr;
 	unsigned int		erase_size;		/* In sectors */
+	unsigned int		wp_grp_size;
 	unsigned int		read_blkbits;
 	unsigned int		write_blkbits;
 	unsigned int		capacity;
@@ -145,6 +146,7 @@ struct sd_ssr {
 	unsigned int		au;			/* In sectors */
 	unsigned int		erase_timeout;		/* In milliseconds */
 	unsigned int		erase_offset;		/* In milliseconds */
+	unsigned int		speed_class;		/* speed_class */
 };
 
 struct sd_switch_caps {
@@ -278,6 +280,7 @@ struct mmc_card {
  	unsigned int		pref_erase;	/* in sectors */
 	unsigned int		eg_boundary;	/* don't cross erase-group boundaries */
  	u8			erased_byte;	/* value of erased bytes */
+	unsigned int		wp_grp_size; /* write group size in sectors */
 
 	u32			raw_cid[4];	/* raw card CID */
 	u32			raw_csd[4];	/* raw card CSD */
@@ -289,7 +292,12 @@ struct mmc_card {
 	struct sd_scr		scr;		/* extra SD information */
 	struct sd_ssr		ssr;		/* yet more SD information */
 	struct sd_switch_caps	sw_caps;	/* switch (CMD6) caps */
-
+#ifdef CONFIG_MMC_PASSWORDS
+#define MAX_UNLOCK_PASSWORD_WITH_BUF 20    	/* 1(len) + max_pwd(16) + 0xFF 0xFF + 0 = 20 */
+	bool swith_voltage; 			/* whether sdcard voltage swith to 1.8v  */
+	bool auto_unlock;
+	u8 unlock_pwd[MAX_UNLOCK_PASSWORD_WITH_BUF];
+#endif
 	unsigned int		sdio_funcs;	/* number of SDIO functions */
 	struct sdio_cccr	cccr;		/* common card info */
 	struct sdio_cis		cis;		/* common tuple info */
@@ -306,6 +314,10 @@ struct mmc_card {
 	struct dentry		*debugfs_root;
 	struct mmc_part	part[MMC_NUM_PHY_PARTITION]; /* physical partitions */
 	unsigned int    nr_parts;
+#ifdef CONFIG_MTK_EMMC_HW_CQ
+	unsigned int	part_curr;
+	bool cqe_init;
+#endif
 
 	unsigned int		bouncesz;	/* Bounce buffer size */
 	struct workqueue_struct *complete_wq;	/* Private workqueue */
