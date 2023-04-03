@@ -59,3 +59,17 @@ obj-$(CONFIG_PCI_ENDPOINT_TEST)	+= pci_endpoint_test.o
 obj-$(CONFIG_OCXL)		+= ocxl/
 obj-$(CONFIG_MISC_RTSX)		+= cardreader/
 obj-$(CONFIG_UID_SYS_STATS)	+= uid_sys_stats.o
+obj-y				+= mediatek/
+obj-$(CONFIG_AW8697_HAPTIC)		+= aw8697_haptic/
+#ifdef OPLUS_ARCH_EXTEND
+obj-$(CONFIG_MTK_LCM)		+= oplus/
+#endif
+
+obj-$(CONFIG_OPLUS_MISC_HEALTHONFO)		+= oplus_misc_healthinfo/
+#ifdef OPLUS_FEATURE_TP_BASIC
+obj-$(CONFIG_SIM_DETECT)	+= sim_detect.o
+#endif
+
+#ifdef CONFIG_OPLUS_TRIKEY_HALL
+obj-y				+= tri_state_key/
+#endif CONFIG_OPLUS_TRIKEY_HALL

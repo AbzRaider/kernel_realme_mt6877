@@ -78,6 +78,22 @@ static struct wakeup_source deleted_ws = {
 static DEFINE_IDA(wakeup_ida);
 
 /**
+ * wakeup_source_prepare - Prepare a new wakeup source for initialization.
+ * @ws: Wakeup source to prepare.
+ * @name: Pointer to the name of the new wakeup source.
+ *
+ * Callers must ensure that the @name string won't be freed when @ws is still in
+ * use.
+ */
+void wakeup_source_prepare(struct wakeup_source *ws, const char *name)
+{
+        if (ws) {
+                memset(ws, 0, sizeof(*ws));
+                ws->name = name;
+        }
+}
+
+/**
  * wakeup_source_create - Create a struct wakeup_source object.
  * @name: Name of the new wakeup source.
  */
@@ -858,7 +874,7 @@ void pm_print_active_wakeup_sources(void)
 	srcuidx = srcu_read_lock(&wakeup_srcu);
 	list_for_each_entry_rcu(ws, &wakeup_sources, entry) {
 		if (ws->active) {
-			pr_debug("active wakeup source: %s\n", ws->name);
+			pr_info("active wakeup source: %s\n", ws->name);
 			active = 1;
 		} else if (!active &&
 			   (!last_activity_ws ||
@@ -869,7 +885,7 @@ void pm_print_active_wakeup_sources(void)
 	}
 
 	if (!active && last_activity_ws)
-		pr_debug("last active wakeup source: %s\n",
+		pr_info("last active wakeup source: %s\n",
 			last_activity_ws->name);
 	srcu_read_unlock(&wakeup_srcu, srcuidx);
 }
@@ -1046,6 +1062,8 @@ static struct dentry *wakeup_sources_stats_dentry;
  * @m: seq_file to print the statistics into.
  * @ws: Wakeup source object to print the statistics for.
  */
+#if !defined (CONFIG_MACH_MT6833)
+  //TODO Temp block
 static int print_wakeup_source_stats(struct seq_file *m,
 				     struct wakeup_source *ws)
 {
@@ -1088,7 +1106,7 @@ static int print_wakeup_source_stats(struct seq_file *m,
 
 	return 0;
 }
-
+#endif
 static void *wakeup_sources_stats_seq_start(struct seq_file *m,
 					loff_t *pos)
 {
@@ -1141,10 +1159,12 @@ static void wakeup_sources_stats_seq_stop(struct seq_file *m, void *v)
  */
 static int wakeup_sources_stats_seq_show(struct seq_file *m, void *v)
 {
-	struct wakeup_source *ws = v;
+#if !defined (CONFIG_MACH_MT6833)
+  //TODO Temp block
+  struct wakeup_source *ws = v;
 
 	print_wakeup_source_stats(m, ws);
-
+#endif
 	return 0;
 }
 
