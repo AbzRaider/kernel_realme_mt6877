@@ -423,6 +423,17 @@ config IRQ_TIME_ACCOUNTING
 
 	  If in doubt, say N here.
 
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+config SCHED_WALT
+	bool "Support window based load tracking"
+	depends on SMP
+	help
+	  This feature will allow the scheduler to maintain a tunable window
+	  based set of metrics for tasks and runqueues. These metrics can be
+	  used to guide task placement as well as task frequency requirements
+	  for cpufreq governors.
+#endif /* OPLUS_FEATURE_SCHED_ASSIST */
+
 config HAVE_SCHED_AVG_IRQ
 	def_bool y
 	depends on IRQ_TIME_ACCOUNTING || PARAVIRT_TIME_ACCOUNTING
@@ -725,7 +736,10 @@ config UCLAMP_BUCKETS_COUNT
 	  precision.
 
 	  If in doubt, use the default value.
-
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+source "kernel/sched_assist/Kconfig"
+source "kernel/locking/klockopt/Kconfig"
+#endif
 endmenu
 
 #
@@ -1130,7 +1144,6 @@ config SCHED_AUTOGROUP
 
 config SCHED_TUNE
 	bool "Boosting for CFS tasks (EXPERIMENTAL)"
-	depends on !UCLAMP_TASK
 	depends on SMP
 	help
 	  This option enables support for task classification using a new
@@ -1583,7 +1596,7 @@ config KALLSYMS_ABSOLUTE_PERCPU
 	default X86_64 && SMP
 
 config KALLSYMS_BASE_RELATIVE
-	bool
+	bool "Enable KALLSYMS_BASE_RELATIVE or not"
 	depends on KALLSYMS
 	default !IA64
 	help
@@ -1680,6 +1693,11 @@ config PC104
 	  Expose PC/104 form factor device drivers and options available for
 	  selection and configuration. Enable this option if your target
 	  machine has a PC/104 bus.
+
+
+menu "Extension scheduler feature"
+source "kernel/sched/extension/Kconfig"
+endmenu
 
 menu "Kernel Performance Events And Counters"
 
@@ -2166,6 +2184,12 @@ config ASN1
 	  functions to call on what tags.
 
 source "kernel/Kconfig.locks"
+
+config OPLUS_FEATURE_EAS_IGNORE_CACHEMISS
+	bool "EAS: ignore cachemiss"
+	default n
+	help
+	  EAS: change function "find_energy_efficient_cpu" as kernel-4.14, ignore cachemiss
 
 config ARCH_HAS_SYNC_CORE_BEFORE_USERMODE
 	bool

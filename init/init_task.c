@@ -6,6 +6,7 @@
 #include <linux/sched/sysctl.h>
 #include <linux/sched/rt.h>
 #include <linux/sched/task.h>
+#include <linux/sched/topology.h>
 #include <linux/init.h>
 #include <linux/fs.h>
 #include <linux/mm.h>
@@ -148,6 +149,9 @@ struct task_struct init_task
 #ifdef CONFIG_RT_MUTEXES
 	.pi_waiters	= RB_ROOT_CACHED,
 	.pi_top_task	= NULL,
+#endif
+#ifdef CONFIG_KERNEL_LOCK_OPT
+	.own_rwsem	= LIST_HEAD_INIT(init_task.own_rwsem),
 #endif
 	INIT_PREV_CPUTIME(init_task)
 #ifdef CONFIG_VIRT_CPU_ACCOUNTING_GEN
