@@ -34,6 +34,10 @@
 #include <linux/prefetch.h>
 #include <linux/memcontrol.h>
 #include <linux/random.h>
+#if defined(OPLUS_FEATURE_MEMLEAK_DETECT) && defined(CONFIG_KMALLOC_DEBUG)
+/*  calc the stack hash */
+#include <linux/jhash.h>
+#endif
 
 #include <trace/events/kmem.h>
 
@@ -117,10 +121,19 @@
 
 static inline int kmem_cache_debug(struct kmem_cache *s)
 {
+#ifdef OPLUS_FEATURE_MEMLEAK_DETECT
+	/* add more check the slab is debug while enable CONFIG_KMALLOC_DEBUG.*/
+#if defined(CONFIG_KMALLOC_DEBUG) || defined(CONFIG_SLUB_DEBUG)
+	return unlikely(s->flags & SLAB_DEBUG_FLAGS);
+#else
+	return 0;
+#endif
+#else
 #ifdef CONFIG_SLUB_DEBUG
 	return unlikely(s->flags & SLAB_DEBUG_FLAGS);
 #else
 	return 0;
+#endif
 #endif
 }
 
@@ -199,11 +212,22 @@ static inline bool kmem_cache_has_cpu_partial(struct kmem_cache *s)
 /*
  * Tracking user of a slab.
  */
+#if !defined(OPLUS_FEATURE_MEMLEAK_DETECT) || !defined(CONFIG_KMALLOC_DEBUG) || !defined(CONFIG_MEMLEAK_DETECT_THREAD)
+#define TRACK_ADDRS_COUNT 12
+#else
+/* set kmalloc_debug tack stack depth. */
 #define TRACK_ADDRS_COUNT 16
+#endif
+
 struct track {
 	unsigned long addr;	/* Called from address */
 #ifdef CONFIG_STACKTRACE
 	unsigned long addrs[TRACK_ADDRS_COUNT];	/* Called from address */
+#if defined(OPLUS_FEATURE_MEMLEAK_DETECT) && defined(CONFIG_KMALLOC_DEBUG)
+	/* save the stack depth and hash. */
+	u32 depth;
+	u32 hash;
+#endif
 #endif
 	int cpu;		/* Was running on cpu */
 	int pid;		/* Pid context */
@@ -439,7 +463,8 @@ static inline bool cmpxchg_double_slab(struct kmem_cache *s, struct page *page,
 	return false;
 }
 
-#ifdef CONFIG_SLUB_DEBUG
+#if defined(CONFIG_SLUB_DEBUG) || (defined(OPLUS_FEATURE_MEMLEAK_DETECT) && defined(CONFIG_KMALLOC_DEBUG))
+/* dump kmalloc debug info need this funciton. */
 /*
  * Determine a map of object in use on a page.
  *
@@ -571,6 +596,13 @@ static void set_track(struct kmem_cache *s, void *object,
 		for (i = trace.nr_entries; i < TRACK_ADDRS_COUNT; i++)
 			p->addrs[i] = 0;
 #endif
+#if defined(OPLUS_FEATURE_MEMLEAK_DETECT) && defined(CONFIG_KMALLOC_DEBUG)
+		/* save the stack depth and hash. */
+		p->depth = trace.nr_entries;
+		p->hash = jhash2((u32 *)p->addrs,
+				sizeof(p->addrs[0])/sizeof(u32)*trace.nr_entries,
+				0xabcd);
+#endif
 		p->addr = addr;
 		p->cpu = smp_processor_id();
 		p->pid = current->pid;
@@ -584,7 +616,10 @@ static void init_tracking(struct kmem_cache *s, void *object)
 	if (!(s->flags & SLAB_STORE_USER))
 		return;
 
+#ifdef CONFIG_SLUB_DEBUG
+	/* only record alloc stack. */
 	set_track(s, object, TRACK_FREE, 0UL);
+#endif
 	set_track(s, object, TRACK_ALLOC, 0UL);
 }
 
@@ -695,8 +730,14 @@ static void print_trailer(struct kmem_cache *s, struct page *page, u8 *p)
 	else
 		off = s->inuse;
 
+#ifdef CONFIG_SLUB_DEBUG
 	if (s->flags & SLAB_STORE_USER)
 		off += 2 * sizeof(struct track);
+#else
+	/*  only save call stack to save memory. */
+	if (s->flags & SLAB_STORE_USER)
+		off += sizeof(struct track);
+#endif
 
 	off += kasan_metadata_size(s);
 
@@ -705,7 +746,7 @@ static void print_trailer(struct kmem_cache *s, struct page *page, u8 *p)
 		print_section(KERN_ERR, "Padding ", p + off,
 			      size_from_object(s) - off);
 
-	dump_stack();
+	WARN_ON(1);
 }
 
 void object_err(struct kmem_cache *s, struct page *page,
@@ -726,7 +767,7 @@ static __printf(3, 4) void slab_err(struct kmem_cache *s, struct page *page,
 	va_end(args);
 	slab_bug(s, "%s", buf);
 	print_page_info(page);
-	dump_stack();
+	WARN_ON(1);
 }
 
 static void init_object(struct kmem_cache *s, void *object, u8 val)
@@ -758,6 +799,7 @@ static int check_bytes_and_report(struct kmem_cache *s, struct page *page,
 {
 	u8 *fault;
 	u8 *end;
+	u8 *addr = page_address(page);
 
 	metadata_access_enable();
 	fault = memchr_inv(start, value, bytes);
@@ -770,8 +812,9 @@ static int check_bytes_and_report(struct kmem_cache *s, struct page *page,
 		end--;
 
 	slab_bug(s, "%s overwritten", what);
-	pr_err("INFO: 0x%p-0x%p. First byte 0x%x instead of 0x%x\n",
-					fault, end - 1, fault[0], value);
+	pr_err("INFO: 0x%p-0x%p @offset=%tu. First byte 0x%x instead of 0x%x\n",
+					fault, end - 1, fault - addr,
+					fault[0], value);
 	print_trailer(s, page, object);
 
 	restore_bytes(s, what, value, fault, end);
@@ -824,9 +867,16 @@ static int check_pad_bytes(struct kmem_cache *s, struct page *page, u8 *p)
 		/* Freepointer is placed after the object. */
 		off += sizeof(void *);
 
+#ifdef CONFIG_SLUB_DEBUG
 	if (s->flags & SLAB_STORE_USER)
 		/* We also have user information there */
 		off += 2 * sizeof(struct track);
+#else
+	/* only save call stack to save memory. */
+	if (s->flags & SLAB_STORE_USER)
+		/* We also have user information there */
+		off += sizeof(struct track);
+#endif
 
 	off += kasan_metadata_size(s);
 
@@ -866,7 +916,8 @@ static int slab_pad_check(struct kmem_cache *s, struct page *page)
 	while (end > fault && end[-1] == POISON_INUSE)
 		end--;
 
-	slab_err(s, page, "Padding overwritten. 0x%p-0x%p", fault, end - 1);
+	slab_err(s, page, "Padding overwritten. 0x%p-0x%p @offset=%tu",
+			fault, end - 1, fault - start);
 	print_section(KERN_ERR, "Padding ", pad, remainder);
 
 	restore_bytes(s, "slab padding", POISON_INUSE, fault, end);
@@ -1023,7 +1074,7 @@ static void trace(struct kmem_cache *s, struct page *page, void *object,
 			print_section(KERN_INFO, "Object ", (void *)object,
 					s->object_size);
 
-		dump_stack();
+		WARN_ON(1);
 	}
 }
 
@@ -1214,8 +1265,11 @@ next_object:
 			goto out;
 	}
 
+#ifdef CONFIG_SLUB_DEBUG
+	/* only record alloc stack. */
 	if (s->flags & SLAB_STORE_USER)
 		set_track(s, object, TRACK_FREE, addr);
+#endif
 	trace(s, page, object, 0);
 	/* Freepointer not overwritten by init_object(), SLAB_POISON moved it */
 	init_object(s, object, SLUB_RED_INACTIVE);
@@ -1311,6 +1365,10 @@ out:
 
 __setup("slub_debug", setup_slub_debug);
 
+#ifdef CONFIG_SLUB_DEBUG
+/* only open debug options while
+ * CONFIG_SLUB_DEBUG is enabled.
+ */
 slab_flags_t kmem_cache_flags(unsigned int object_size,
 	slab_flags_t flags, const char *name,
 	void (*ctor)(void *))
@@ -1324,7 +1382,20 @@ slab_flags_t kmem_cache_flags(unsigned int object_size,
 
 	return flags;
 }
+#elif defined(OPLUS_FEATURE_MEMLEAK_DETECT) && defined(CONFIG_KMALLOC_DEBUG)
+slab_flags_t kmem_cache_flags(unsigned int object_size,
+	slab_flags_t flags, const char *name,
+	void (*ctor)(void *))
+{
+	return flags;
+}
+#endif
 #else /* !CONFIG_SLUB_DEBUG */
+#ifdef OPLUS_FEATURE_MEMLEAK_DETECT
+/* implement the functions
+ * while CONFIG_KMALLOC_DEBUG enabled.
+ */
+#ifndef CONFIG_KMALLOC_DEBUG
 static inline void setup_object_debug(struct kmem_cache *s,
 			struct page *page, void *object) {}
 static inline void setup_page_debug(struct kmem_cache *s,
@@ -1337,15 +1408,38 @@ static inline int free_debug_processing(
 	struct kmem_cache *s, struct page *page,
 	void *head, void *tail, int bulk_cnt,
 	unsigned long addr) { return 0; }
+#endif
+#else
+static inline void setup_object_debug(struct kmem_cache *s,
+			struct page *page, void *object) {}
+
+static inline int alloc_debug_processing(struct kmem_cache *s,
+	struct page *page, void *object, unsigned long addr) { return 0; }
+
+static inline int free_debug_processing(
+	struct kmem_cache *s, struct page *page,
+	void *head, void *tail, int bulk_cnt,
+	unsigned long addr) { return 0; }
+#endif
 
 static inline int slab_pad_check(struct kmem_cache *s, struct page *page)
 			{ return 1; }
 static inline int check_object(struct kmem_cache *s, struct page *page,
 			void *object, u8 val) { return 1; }
+#ifdef OPLUS_FEATURE_MEMLEAK_DETECT
+/* implement the functions while CONFIG_KMALLOC_DEBUG enabled. */
+#ifndef CONFIG_KMALLOC_DEBUG
 static inline void add_full(struct kmem_cache *s, struct kmem_cache_node *n,
 					struct page *page) {}
 static inline void remove_full(struct kmem_cache *s, struct kmem_cache_node *n,
 					struct page *page) {}
+#endif
+#else
+static inline void add_full(struct kmem_cache *s, struct kmem_cache_node *n,
+					struct page *page) {}
+static inline void remove_full(struct kmem_cache *s, struct kmem_cache_node *n,
+					struct page *page) {}
+#endif
 slab_flags_t kmem_cache_flags(unsigned int object_size,
 	slab_flags_t flags, const char *name,
 	void (*ctor)(void *))
@@ -2389,7 +2483,8 @@ static inline int node_match(struct page *page, int node)
 	return 1;
 }
 
-#ifdef CONFIG_SLUB_DEBUG
+#if defined(CONFIG_SLUB_DEBUG) || (defined(OPLUS_FEATURE_MEMLEAK_DETECT) && defined(CONFIG_KMALLOC_DEBUG))
+/* open slabinfo need these apis. */
 static int count_free(struct page *page)
 {
 	return page->objects - page->inuse;
@@ -3362,7 +3457,7 @@ init_kmem_cache_node(struct kmem_cache_node *n)
 	n->nr_partial = 0;
 	spin_lock_init(&n->list_lock);
 	INIT_LIST_HEAD(&n->partial);
-#ifdef CONFIG_SLUB_DEBUG
+#if defined(CONFIG_SLUB_DEBUG) || (defined(OPLUS_FEATURE_MEMLEAK_DETECT) && defined(CONFIG_KMALLOC_DEBUG))
 	atomic_long_set(&n->nr_slabs, 0);
 	atomic_long_set(&n->total_objects, 0);
 	INIT_LIST_HEAD(&n->full);
@@ -3588,6 +3683,9 @@ static int calculate_sizes(struct kmem_cache *s, int forced_order)
 		 * the object.
 		 */
 		size += 2 * sizeof(struct track);
+#elif defined(OPLUS_FEATURE_MEMLEAK_DETECT) && defined(CONFIG_KMALLOC_DEBUG)
+	if (flags & SLAB_STORE_USER)
+		size += sizeof(struct track);
 #endif
 
 	kasan_cache_create(s, &size, &s->flags);
@@ -5170,6 +5268,14 @@ static ssize_t cache_dma_show(struct kmem_cache *s, char *buf)
 SLAB_ATTR_RO(cache_dma);
 #endif
 
+#ifdef CONFIG_ZONE_DMA32
+static ssize_t cache_dma32_show(struct kmem_cache *s, char *buf)
+{
+	return sprintf(buf, "%d\n", !!(s->flags & SLAB_CACHE_DMA32));
+}
+SLAB_ATTR_RO(cache_dma32);
+#endif
+
 static ssize_t usersize_show(struct kmem_cache *s, char *buf)
 {
 	return sprintf(buf, "%u\n", s->usersize);
@@ -5329,7 +5435,13 @@ static ssize_t free_calls_show(struct kmem_cache *s, char *buf)
 {
 	if (!(s->flags & SLAB_STORE_USER))
 		return -ENOSYS;
+
+#if !defined(OPLUS_FEATURE_MEMLEAK_DETECT) || !defined(CONFIG_KMALLOC_DEBUG) || defined(CONFIG_SLUB_DEBUG)
+	/* only record alloc stack. */
 	return list_locations(s, buf, TRACK_FREE);
+#else
+	return -ENOSYS;
+#endif
 }
 SLAB_ATTR_RO(free_calls);
 #endif /* CONFIG_SLUB_DEBUG */
@@ -5509,6 +5621,9 @@ static struct attribute *slab_attrs[] = {
 #endif
 #ifdef CONFIG_ZONE_DMA
 	&cache_dma_attr.attr,
+#endif
+#ifdef CONFIG_ZONE_DMA32
+	&cache_dma32_attr.attr,
 #endif
 #ifdef CONFIG_NUMA
 	&remote_node_defrag_ratio_attr.attr,
@@ -5951,7 +6066,7 @@ __initcall(slab_sysfs_init);
 /*
  * The /proc/slabinfo ABI
  */
-#ifdef CONFIG_SLUB_DEBUG
+#if defined(CONFIG_SLUB_DEBUG) || (defined(OPLUS_FEATURE_MEMLEAK_DETECT) && defined(CONFIG_KMALLOC_DEBUG))
 void get_slabinfo(struct kmem_cache *s, struct slabinfo *sinfo)
 {
 	unsigned long nr_slabs = 0;
@@ -5984,3 +6099,18 @@ ssize_t slabinfo_write(struct file *file, const char __user *buffer,
 	return -EIO;
 }
 #endif /* CONFIG_SLUB_DEBUG */
+
+#ifdef CONFIG_KMALLOC_DEBUG
+#ifdef OPLUS_FEATURE_MEMLEAK_DETECT
+/* calc the stack hash */
+#include "malloc_track/slub_track.c"
+#else
+int __init __weak create_kmalloc_debug(struct proc_dir_entry *parent)
+{
+	pr_warn("OPLUS_FEATURE_MEMLEAK_DETECT is off.\n");
+	return 0;
+}
+EXPORT_SYMBOL(create_kmalloc_debug);
+#endif
+#endif
+
