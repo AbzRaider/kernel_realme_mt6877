@@ -13,7 +13,7 @@
 #include <linux/soc/mediatek/mtk_sip_svc.h>
 #include "scp_reg.h"
 #include "scp_feature_define.h"
-#include "scp.h"
+#include "../include/scp.h"
 
 #define ROUNDUP(a, b)		        (((a) + ((b)-1)) & ~((b)-1))
 

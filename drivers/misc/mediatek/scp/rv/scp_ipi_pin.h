@@ -7,7 +7,7 @@
 #define _SCP_IPI_PIN_H_
 
 #include <linux/soc/mediatek/mtk_tinysys_ipi.h>
-#include "scp.h"
+#include "../include/scp.h"
 
 /* scp awake timeout count definition */
 #define SCP_AWAKE_TIMEOUT 100000
