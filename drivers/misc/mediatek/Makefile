@@ -213,3 +213,8 @@ obj-$(CONFIG_MTK_TASK_TURBO) += task_turbo/
 
 # GPU
 obj-y += gpu/
+
+# MET Driver
+obj-y += met_drv_v2/
+obj-y += met_drv_v3/
+
