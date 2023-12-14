@@ -1634,13 +1634,8 @@ PMR_WriteBytes(PMR *psPMR,
 }
 
 PVRSRV_ERROR
-PMRMMapPMR(PMR *psPMR, PMR_MMAP_DATA pOSMMapData, PVRSRV_MEMALLOCFLAGS_T uiFlags)
+PMRMMapPMR(PMR *psPMR, PMR_MMAP_DATA pOSMMapData)
 {
-	/* if writeable mapping is requested on non-writeable PMR then fail */
-	PVR_RETURN_IF_FALSE(PVRSRV_CHECK_CPU_WRITEABLE(psPMR->uiFlags) ||
-	                    !PVRSRV_CHECK_CPU_WRITEABLE(uiFlags),
-	                    PVRSRV_ERROR_PMR_NOT_PERMITTED);
-
 	if (psPMR->psFuncTab->pfnMMap)
 	{
 		return psPMR->psFuncTab->pfnMMap(psPMR->pvFlavourData, psPMR, pOSMMapData);
@@ -1880,8 +1875,7 @@ PMR_DevPhysAddr(const PMR *psPMR,
 		 * concerns.
 		 * We do not need this part in all systems because the GPU has the same
 		 * address view of system RAM as the CPU.
-		 * Alternatively this could be implemented as part of the PMR-factories
-		 * directly */
+		 * Alternatively this could be implemented as part of the PMR-factories directly */
 		if (PhysHeapGetType(psPMR->psPhysHeap) == PHYS_HEAP_TYPE_UMA ||
 		    PhysHeapGetType(psPMR->psPhysHeap) == PHYS_HEAP_TYPE_DMA)
 		{

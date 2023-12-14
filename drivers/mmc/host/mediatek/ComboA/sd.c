@@ -55,6 +55,10 @@
 
 #include "dbg.h"
 
+#ifdef OPLUS_FEATURE_SDCARD_INFO
+#include "../../sdInfo/sdinfo.h"
+#endif
+
 #define CAPACITY_2G             (2 * 1024 * 1024 * 1024ULL)
 
 /* FIX ME: Check if its reference in mtk_sd_misc.h can be removed */
@@ -1451,6 +1455,7 @@ static unsigned int msdc_command_start(struct msdc_host   *host,
 	case MMC_SEND_TUNING_BLOCK_HS200:
 		rawcmd |= (1 << 11);
 		break;
+	case MMC_LOCK_UNLOCK:
 	case MMC_WRITE_BLOCK:
 		rawcmd |= ((1 << 11) | (1 << 13));
 		break;
@@ -2480,16 +2485,15 @@ static void msdc_dma_start(struct msdc_host *host)
 	if (host->autocmd & MSDC_AUTOCMD12)
 		wints |= MSDC_INT_ACMDCRCERR | MSDC_INT_ACMDTMO
 			| MSDC_INT_ACMDRDY;
-	MSDC_SET_FIELD(MSDC_DMA_CTRL, MSDC_DMA_CTRL_START, 1);
-
-	spin_lock_irqsave(&host->reg_lock, flags);
-	MSDC_SET_BIT32(MSDC_INTEN, wints);
-	spin_unlock_irqrestore(&host->reg_lock, flags);
-
-	N_MSG(DMA, "DMA start");
 	/* Schedule delayed work to check if data0 keeps busy */
 	if (host->data) {
 		host->data_timeout_ms = DATA_TIMEOUT_MS;
+#ifdef OPLUS_FEATURE_SDCARD_INFO
+		if (get_dma_data_timeout() && host->mmc && host->mmc->card && mmc_card_sd(host->mmc->card)) {
+			host->data_timeout_ms = 1000  * 10;    /* 10s */
+			pr_err("mmc set dma timeout to 10s\n");
+		}
+#endif
 		schedule_delayed_work(&host->data_timeout_work,
 			msecs_to_jiffies(host->data_timeout_ms));
 		N_MSG(DMA, "DMA Data Busy Timeout:%u ms, schedule_delayed_work",
@@ -2499,7 +2503,30 @@ static void msdc_dma_start(struct msdc_host *host)
 	host->dma_cnt++;
 	host->start_dma_time = sched_clock();
 	host->stop_dma_time = 0;
+
+	spin_lock_irqsave(&host->reg_lock, flags);
+	MSDC_SET_BIT32(MSDC_INTEN, wints);
+	spin_unlock_irqrestore(&host->reg_lock, flags);
+
+	N_MSG(DMA, "DMA start");
+	MSDC_SET_FIELD(MSDC_DMA_CTRL, MSDC_DMA_CTRL_START, 1);
+
 	mb(); /* make sure write committed */
+}
+
+static bool msdc_cancel_delay_work(struct msdc_host *host)
+{
+	bool ret;
+
+	/* Clear DMA data busy timeout */
+	ret = cancel_delayed_work(&host->data_timeout_work);
+	N_MSG(DMA, "DMA Data Busy Timeout:%u ms, cancel_delayed_work",
+		host->data_timeout_ms);
+	WARN_ON(!ret);
+	if (!ret)
+		ERR_MSG("cancel delayed work failed!, ret = %d\n", ret);
+
+	return ret;
 }
 
 static void msdc_dma_stop(struct msdc_host *host)
@@ -2509,14 +2536,6 @@ static void msdc_dma_stop(struct msdc_host *host)
 	int count = 1000;
 	u32 wints = MSDC_INT_XFER_COMPL | MSDC_INT_DATTMO | MSDC_INT_DATCRCERR;
 	unsigned long flags;
-
-	/* Clear DMA data busy timeout */
-	if (host->data) {
-		cancel_delayed_work(&host->data_timeout_work);
-		N_MSG(DMA, "DMA Data Busy Timeout:%u ms, cancel_delayed_work",
-			host->data_timeout_ms);
-		host->data_timeout_ms = 0; /* clear timeout */
-	}
 
 	/* handle autocmd12 error in msdc_irq */
 	if (host->autocmd & MSDC_AUTOCMD12)
@@ -2837,6 +2856,8 @@ int msdc_rw_cmd_using_sync_dma(struct mmc_host *mmc, struct mmc_command *cmd,
 	}
 	spin_lock(&host->lock);
 
+	if (host->data)
+		msdc_cancel_delay_work(host);
 	msdc_dma_stop(host);
 
 	if ((mrq->data && mrq->data->error)
@@ -3558,12 +3579,9 @@ int msdc_error_tuning(struct mmc_host *mmc,  struct mmc_request *mrq)
 	}
 
 	/* send stop command if device not in transfer state */
-	if (R1_CURRENT_STATE(status) == R1_STATE_DATA ||
-		R1_CURRENT_STATE(status) == R1_STATE_RCV) {
-		ret = msdc_stop_and_wait_busy(host);
-		if (ret)
-			goto recovery;
-	}
+	if (R1_CURRENT_STATE(status) != R1_STATE_TRAN &&
+		msdc_stop_and_wait_busy(host))
+		goto recovery;
 
 start_tune:
 	msdc_pmic_force_vcore_pwm(true);
@@ -4110,6 +4128,18 @@ static void msdc_ops_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	int host_cookie = 0;
 	struct msdc_host *host = mmc_priv(mmc);
 
+#ifdef OPLUS_FEATURE_SDCARD_INFO
+	if ((SET_SDCARD_QUICK_RETURN == get_sdcard_remove()) && mmc->card && mmc_card_sd(mmc->card)) {
+		if (mrq && mrq->cmd && ((mrq->cmd->opcode == MMC_READ_SINGLE_BLOCK) || (mrq->cmd->opcode == MMC_READ_MULTIPLE_BLOCK) || (mrq->cmd->opcode == MMC_WRITE_BLOCK) || (mrq->cmd->opcode == MMC_WRITE_MULTIPLE_BLOCK))) {
+			pr_err("mmc card(sd) error, cmd: %u arg: %u\n", mrq->cmd->opcode, mrq->cmd->arg);
+			mrq->cmd->error = (unsigned int)-EIO;
+			if (mrq->done)
+				mrq->done(mrq);
+			goto end;
+		}
+	}
+#endif
+
 	if ((host->hw->host_function == MSDC_SDIO) &&
 	    !(host->trans_lock->active))
 		__pm_stay_awake(host->trans_lock);
@@ -4328,6 +4358,7 @@ static int msdc_ops_get_cd(struct mmc_host *mmc)
 #endif
 		host->card_inserted = (host->hw->cd_level == level) ? 1 : 0;
 	}
+	pr_debug("gpio_get_value==%d, card_inserted==%d, cd_level==%d\n", level, host->card_inserted, host->hw->cd_level);
 
 	if (host->block_bad_card)
 		host->card_inserted = 0;
@@ -4412,7 +4443,7 @@ static int msdc_ops_switch_volt(struct mmc_host *mmc, struct mmc_ios *ios)
 {
 	struct msdc_host *host = mmc_priv(mmc);
 	void __iomem *base = host->base;
-	unsigned int status = 0, value = 0;
+	unsigned int status = 0;
 
 	if (host->hw->host_function == MSDC_EMMC)
 		return 0;
@@ -4438,15 +4469,11 @@ static int msdc_ops_switch_volt(struct mmc_host *mmc, struct mmc_ios *ios)
 		/* set as 500T -> 1.25ms for 400KHz or 1.9ms for 260KHz */
 		msdc_set_vol_change_wait_count(VOL_CHG_CNT_DEFAULT_VAL);
 
-		/*  CMD11 will enable SWITCH detect while mmc core layer trigger
+		/*  CMD11 will enable SWITCH detect while mmc core layer trriger
 		 *  switch voltage flow without cmd11 for somecase,so also enable switch
-		 *  detect before switch.Otherwise will hang in this func
-		 *  when SDC_CMD_VOLSWTH is not set.
+		 *  detect before switch.Otherwise will hang in this func.
 		 */
-		MSDC_GET_FIELD(SDC_CMD, SDC_CMD_VOLSWTH, value);
-		if (!value)
-			MSDC_SET_BIT32(SDC_CMD, SDC_CMD_VOLSWTH);
-
+		MSDC_SET_BIT32(SDC_CMD, SDC_CMD_VOLSWTH);
 		/* start to provide clock to device */
 		MSDC_SET_BIT32(MSDC_CFG, MSDC_CFG_BV18SDT);
 		/* Delay 1ms wait HW to finish voltage switch */
@@ -4574,6 +4601,9 @@ static void msdc_check_data_timeout(struct work_struct *work)
 		spin_unlock(&host->lock);
 
 		data->error = (unsigned int)-ETIMEDOUT;
+#ifdef OPLUS_FEATURE_SDCARD_INFO
+		sdinfo.data_timeout_count += 1;
+#endif
 		host->sw_timeout++;
 
 		if (mrq->done)
@@ -4622,9 +4652,15 @@ static void msdc_irq_data_complete(struct msdc_host *host,
 {
 	void __iomem *base = host->base;
 	struct mmc_request *mrq;
+	bool ret;
 
 	if ((msdc_use_async_dma(data->host_cookie)) &&
 	    (!host->tuning_in_progress)) {
+		if (host->data) {
+			ret = msdc_cancel_delay_work(host);
+			if (!ret)
+				return;
+		}
 		msdc_dma_stop(host);
 		mrq = host->mrq;
 		if (error) {
@@ -4986,6 +5022,10 @@ static int msdc_drv_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+#ifdef OPLUS_FEATURE_SDCARD_INFO
+	sdcard_remove_attr_init_sysfs(&pdev->dev);
+#endif
+
 	ret = msdc_dt_init(pdev, mmc);
 	if (ret) {
 		mmc_free_host(mmc);
@@ -5297,7 +5337,7 @@ static int msdc_suspend(struct device *dev)
 	int ret = 0;
 
 	if (pm_runtime_suspended(dev)) {
-		pr_debug("%s: %s: already runtime suspended\n",
+		pr_err("%s: %s: already runtime suspended\n",
 				mmc_hostname(host->mmc), __func__);
 		goto out;
 	}

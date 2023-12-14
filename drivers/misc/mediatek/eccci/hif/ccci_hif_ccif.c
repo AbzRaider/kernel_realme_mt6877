@@ -1836,7 +1836,7 @@ static int ccif_debug(unsigned char hif_id,
 		if (ccif_ctrl->wakeup_ch) {
 			ccif_ctrl->wakeup_count++;
 			CCCI_NOTICE_LOG(-1, TAG,
-				"CCIF_MD wakeup source: (0x%X)(%u)\n",
+				"CCIF_MD wakeup source: (0x%lX)(%u)\n",
 				ccif_ctrl->wakeup_ch, ccif_ctrl->wakeup_count);
 		}
 		if (test_and_clear_bit(AP_MD_CCB_WAKEUP, &ccif_ctrl->wakeup_ch))
@@ -1891,11 +1891,13 @@ static int ccif_late_init(unsigned char hif_id)
 			ccif_ctrl->ap_ccif_irq1_id, ret);
 		return -1;
 	}
+#if (MD_GENERATION >= 6295)
 	ret = irq_set_irq_wake(ccif_ctrl->ap_ccif_irq1_id, 1);
 	if (ret)
 		CCCI_ERROR_LOG(ccif_ctrl->md_id, TAG,
 			"irq_set_irq_wake ccif ap_ccif_irq1_id(%d) error %d\n",
 			ccif_ctrl->ap_ccif_irq1_id, ret);
+#endif
 	/*need compare k5.10*/
 	md_ccif_ring_buf_init(CCIF_HIF_ID);
 	return 0;
@@ -1973,42 +1975,6 @@ static void ccif_set_clk_on(unsigned char hif_id)
 	CCCI_NORMAL_LOG(ccif_ctrl->md_id, TAG, "%s end\n", __func__);
 }
 
-#if (MD_GENERATION >= 6295)
-extern char *ccci_get_ap_platform(void);
-static void set_md_ccif5_dummy(void)
-{
-	void __iomem *pericfg_dummy;
-	unsigned int pericfg_addr;
-	char *ap_platform = NULL;
-
-	ap_platform = ccci_get_ap_platform();
-#if (MD_GENERATION == 6295)
-	if ((ap_platform != NULL) &&
-		(!strncmp(platform_mt6781, ap_platform, PLATFORM_AP_LEN)))
-		pericfg_addr = 0x10001c10;
-	else
-		pericfg_addr = 0x1000122c;
-#elif (MD_GENERATION == 6297)
-	if ((ap_platform != NULL) &&
-		(!strncmp(platform_mt6877, ap_platform, PLATFORM_AP_LEN)))
-		pericfg_addr = 0x10003200;
-	else
-		pericfg_addr = 0x1000330c;
-#endif
-
-	pericfg_dummy = ioremap_nocache(pericfg_addr, 0x10);
-	if (pericfg_dummy == NULL) {
-		CCCI_NORMAL_LOG(MD_SYS1, TAG,
-			"%s failed ioremap 0x10 bytes from 0x%x\n", __func__, pericfg_addr);
-		return;
-	}
-
-	ccif_write32(pericfg_dummy, 0, 0x0);
-	CCCI_NORMAL_LOG(MD_SYS1, TAG, "%s addr:[0x%x]\n", __func__ ,pericfg_addr);
-
-}
-#endif
-
 static void ccif_set_clk_off(unsigned char hif_id)
 {
 	struct md_ccif_ctrl *ccif_ctrl =
@@ -2017,9 +1983,7 @@ static void ccif_set_clk_off(unsigned char hif_id)
 	unsigned long flags;
 
 	CCCI_NORMAL_LOG(ccif_ctrl->md_id, TAG, "%s start\n", __func__);
-#if (MD_GENERATION >= 6295)
-	set_md_ccif5_dummy();
-#endif
+
 	for (idx = 0; idx < ARRAY_SIZE(ccif_clk_table); idx++) {
 		if (ccif_clk_table[idx].clk_ref == NULL)
 			continue;
@@ -2281,12 +2245,14 @@ static int ccif_hif_hw_init(struct device *dev, struct md_ccif_ctrl *md_ctrl)
 			md_ctrl->ap_ccif_irq0_id, ret);
 		return -1;
 	}
+#if (MD_GENERATION >= 6295)
 	ret = irq_set_irq_wake(md_ctrl->ap_ccif_irq0_id, 1);
 	if (ret){
 		CCCI_ERROR_LOG(md_ctrl->md_id, TAG,
 				"irq_set_irq_wake ccif irq0(%d) error %d\n",
 				md_ctrl->ap_ccif_irq0_id, ret);
 	}
+#endif
 	return 0;
 
 }

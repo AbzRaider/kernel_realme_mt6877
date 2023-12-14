@@ -777,10 +777,11 @@ static int ufs_mtk_setup_ref_clk(struct ufs_hba *hba, bool on)
 		return 0;
 
 	if (on) {
-	#if defined(CONFIG_MACH_MT6781) || defined(CONFIG_MACH_MT6785)
-		clk_buf_ctrl(CLK_BUF_UFS, on);
-	#endif
-		ufs_mtk_ref_clk_notify(on, res);
+		#if defined(CONFIG_MACH_MT6781) || defined(CONFIG_MACH_MT6785)
+			clk_buf_ctrl(CLK_BUF_UFS, on);
+		#else
+			ufs_mtk_ref_clk_notify(on, res);
+		#endif
 		ufshcd_delay_us(host->ref_clk_ungating_wait_us, 10);
 	}
 
@@ -833,8 +834,9 @@ out:
 		ufshcd_delay_us(host->ref_clk_gating_wait_us, 10);
 	#if defined(CONFIG_MACH_MT6781) || defined(CONFIG_MACH_MT6785)
 		clk_buf_ctrl(CLK_BUF_UFS, on);
-	#endif
+	#else
 		ufs_mtk_ref_clk_notify(on, res);
+	#endif
 	}
 
 	return 0;
@@ -1950,6 +1952,7 @@ static void ufs_mtk_auto_hibern8(struct ufs_hba *hba, bool enable)
 	if (!ufs_mtk_has_broken_auto_hibern8(hba))
 		return;
 
+	//dev_dbg(hba->dev, "%s: ah8: %d, ahit: 0x%x\n", __func__, enable, hba->ahit);
 	ufs_mtk_auto_hibern8_update(hba, enable);
 }
 

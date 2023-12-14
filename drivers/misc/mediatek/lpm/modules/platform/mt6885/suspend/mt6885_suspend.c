@@ -491,7 +491,11 @@ static struct notifier_block mt6885_spm_suspend_pm_notifier_func = {
 int __init mt6885_model_suspend_init(void)
 {
 	int ret;
+
+#ifdef CONFIG_PM
 	int i;
+#endif/* CONFIG_PM */
+
 	int suspend_type = mtk_lpm_suspend_type_get();
 
 	if (suspend_type == MTK_LPM_SUSPEND_S2IDLE) {

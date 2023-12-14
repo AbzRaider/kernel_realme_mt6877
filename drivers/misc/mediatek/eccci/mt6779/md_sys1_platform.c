@@ -45,9 +45,9 @@
 #include "modem_secure_base.h"
 #include "modem_reg_base.h"
 #include "ap_md_reg_dump.h"
+#include "hif/ccci_hif_dpmaif.h"
 
 static struct regulator *reg_vmodem, *reg_vsram;
-#include "hif/ccci_hif_dpmaif.h"
 
 static struct ccci_clk_node clk_table[] = {
 /* #ifdef USING_PM_RUNTIME */
@@ -886,6 +886,7 @@ void ccci_notify_set_scpmem(void)
 		CCCI_ERROR_LOG(MD_SYS1, TAG, "%s get_smem fail\n", __func__);
 }
 
+
 int ccci_modem_suspend_noirq(struct device *dev)
 {
 	return dpmaif_suspend_noirq(dev);
@@ -895,4 +896,3 @@ int ccci_modem_resume_noirq(struct device *dev)
 {
 	return dpmaif_resume_noirq(dev);
 }
-

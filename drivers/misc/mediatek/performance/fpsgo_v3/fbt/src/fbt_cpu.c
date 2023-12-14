@@ -492,12 +492,20 @@ static void fbt_set_cap_margin_locked(int set)
 	fpsgo_systrace_c_fbt_gm(-100, 0, set?1024:def_capacity_margin,
 					"cap_margin");
 
-#ifdef CONFIG_MTK_SCHED_EXTENSION
+#if defined(OPLUS_FEATURE_SCHEDUTIL_USE_TL) && defined(CONFIG_SCHEDUTIL_USE_TL)
+	if (set)
+		set_capacity_margin_dvfs(1024);
+	else
+		set_capacity_margin_dvfs(def_capacity_margin);
+#if defined(CONFIG_SCHEDUTIL_USE_TL)
+	set_capacity_margin_dvfs_changed(!!set);
+#endif /* CONFIG_SCHEDUTIL_USE_TL */
+#elif defined(CONFIG_MTK_SCHED_EXTENSION)
 	if (set)
 		set_capacity_margin(1024);
 	else
 		set_capacity_margin(def_capacity_margin);
-#endif
+#endif /* OPLUS_FEATURE_SCHEDUTIL_USE_TL */
 	set_cap_margin = set;
 }
 
@@ -975,7 +983,6 @@ static unsigned int fbt_get_new_base_blc(struct cpu_ctrl_data *pld, int floor)
 	for (cluster = 0 ; cluster < cluster_num; cluster++) {
 		pld[cluster].min = -1;
 		if (suppress_ceiling) {
-			rescue_opp_c = clamp(rescue_opp_c, 0, NR_FREQ_CPU - 1);
 			pld[cluster].max =
 				cpu_dvfs[cluster].power[max(
 				(int)(base_opp[cluster] -
@@ -984,7 +991,6 @@ static unsigned int fbt_get_new_base_blc(struct cpu_ctrl_data *pld, int floor)
 			pld[cluster].max = -1;
 	}
 
-	rescue_opp_f = clamp(rescue_opp_f, 0, NR_FREQ_CPU - 1);
 	blc_wt = fbt_enhance_floor(max_blc, rescue_opp_f);
 
 	mutex_unlock(&fbt_mlock);
@@ -1382,7 +1388,6 @@ static void fbt_do_boost(unsigned int blc_wt, int pid,
 	int cluster, i = 0;
 	int min_ceiling = 0;
 
-	bhr_opp = clamp(bhr_opp, 0, NR_FREQ_CPU - 1);
 	pld =
 		kcalloc(cluster_num, sizeof(struct cpu_ctrl_data),
 				GFP_KERNEL);
@@ -3078,10 +3083,15 @@ static ssize_t enable_switch_cap_margin_show(struct kobject *kobj,
 		FPSGO_SYSFS_MAX_BUFF_SIZE - posi,
 		"set_cap_margin %d\n", set_cap_margin);
 	posi += length;
-
+#if defined(OPLUS_FEATURE_SCHEDUTIL_USE_TL) && defined(CONFIG_SCHEDUTIL_USE_TL)
+	length = scnprintf(temp + posi,
+		FPSGO_SYSFS_MAX_BUFF_SIZE - posi,
+		"get_cap_margin %d\n", get_capacity_margin_dvfs());
+#else
 	length = scnprintf(temp + posi,
 		FPSGO_SYSFS_MAX_BUFF_SIZE - posi,
 		"get_cap_margin %d\n", get_capacity_margin());
+#endif
 	posi += length;
 #endif
 	mutex_unlock(&fbt_mlock);
@@ -3299,7 +3309,9 @@ int __init fbt_cpu_init(void)
 	fbt_down_throttle_enable = 1;
 	sync_flag = -1;
 	fbt_sync_flag_enable = 1;
-#ifdef CONFIG_MTK_SCHED_EXTENSION
+#if defined(OPLUS_FEATURE_SCHEDUTIL_USE_TL) && defined(CONFIG_SCHEDUTIL_USE_TL)
+	def_capacity_margin = get_capacity_margin_dvfs();
+#elif defined(CONFIG_MTK_SCHED_EXTENSION)
 	def_capacity_margin = get_capacity_margin();
 #endif
 	fbt_cap_margin_enable = 1;
