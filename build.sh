@@ -46,7 +46,7 @@ if  [ -d "AnyKernel" ]; then
 	rm -rf AnyKernel
 fi
 git clone --depth=1 https://github.com/Hunter-commits/anykernel.git AnyKernel
-cp out/arch/arm64/boot/Image.gz-dtb AnyKernel
+cp out/arch/arm64/boot/Image.gz AnyKernel
 cd AnyKernel
 zip -r9 TEST-OSS-KERNEL-RM6877.zip *
 curl --upload-file "TEST-OSS-KERNEL-RM6877.zip" https://free.keep.sh
